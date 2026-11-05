@@ -11,11 +11,12 @@ parts replaced by stubs: WinForms controls/dialogs, UI Automation (window tree i
 ## Run
     pwsh -NoProfile -File tests/run_all.ps1
 
-Expected at v8:
+Expected at v9:
 
     test_units.ps1           21 passed    0 failed   OK
     harness_session.ps1      75 passed    0 failed   OK
     harness_edge.ps1         11 passed    0 failed   OK
+    harness_refs.ps1         40 passed    0 failed   OK
     ALL TESTS PASSED
 
 ## Files
@@ -30,7 +31,12 @@ Expected at v8:
                          Error History (crash, hang, .NET stacks, WER report, deployment-tool path), Export Report, and
                          checks for F10-F20 in 00_Findings.txt and files 08-16.
 - `harness_edge.ps1`    empty session, non-PE file, recovered-script outline, empty Error History search.
-- `run_all.ps1`         builds the mock and runs all three, prints a summary.
+- `harness_refs.ps1`    v9 (F21-F25): native mock PlantTool.exe (minimal PE32, Delphi-style CODE section, built by
+                         build_mock.ps1 in tests/work/native9) on a fake station folder (tests/work/station9; E:\... paths
+                         resolve under it). Checks every referenced file / program is listed with Present Yes/No, severity,
+                         arguments, run-by-name programs, no false hits; tab 11, findings, section 3, 17_ReferencedFiles.csv;
+                         a second station where a helper is missing; the .NET mock still works.
+- `run_all.ps1`         builds the mocks and runs all four, prints a summary.
 
 ## Adding a test
 Add `Assert (<condition>) '<Fnn: what is checked>'` lines in harness_session.ps1 (section "== v8 checks" or a new

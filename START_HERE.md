@@ -17,15 +17,15 @@ Claude desktop app / IDE extension). `CLAUDE.md` in the folder root is loaded au
 - Without WSL, Claude Code can still do the parse and ASCII checks with Windows PowerShell 5.1, and you test the GUI on a station.
 
 ## 4. First message to paste into Claude Code
-> Read CLAUDE.md and HANDOFF.md. We are continuing EXE Inspector from v8 (src/ExeInspector_v8.ps1).
+> Read CLAUDE.md and HANDOFF.md. We are continuing EXE Inspector from v9 (src/ExeInspector_v9.ps1).
 > Run the checks listed in CLAUDE.md (parse, ASCII, tests/run_all.ps1 if pwsh is available) and tell me the result.
-> Then wait - I will send new feedback. Log it as F21 onwards, propose a fix plan, and only implement after I say "proceed".
+> Then wait - I will send new feedback. Log it as F26 onwards, propose a fix plan, and only implement after I say "proceed".
 
 ## What is in the folder
 | Path | What |
 |---|---|
 | CLAUDE.md | project rules for Claude Code (auto-loaded) |
-| HANDOFF.md | full history: features, F1-F20 log, export files, what still needs a Windows check, the Setup.exe case |
-| src/ExeInspector_v8.ps1 | the tool |
-| build/ExeInspector_v8_EXE_Build_Package/ | the delivery package (Build-EXE.ps1 + ps2exe 1.0.18 + README) |
-| tests/ | automated test kit (107 checks at v8) - see tests/README.md |
+| HANDOFF.md | full history: features, F1-F25 log, export files, what still needs a Windows check, the Setup.exe case |
+| src/ExeInspector_v9.ps1 | the tool |
+| build/ExeInspector_v9_EXE_Build_Package/ | the delivery package (Build-EXE.ps1 + ps2exe 1.0.18 + README) |
+| tests/ | automated test kit (147 checks at v9) - see tests/README.md |

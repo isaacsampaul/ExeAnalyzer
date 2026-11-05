@@ -4,11 +4,11 @@ Developed by Isaac Sam Paul (DCS Engineer). EXE Inspector is a PowerShell WinFor
 Windows EXE/DLL files to troubleshoot them (used on Foxboro DCS / CCS stations, but it must stay GENERIC -
 it is for troubleshooting ANY exe/dll, never built around one program).
 
-Read HANDOFF.md for the full history (feedback log F1-F20, architecture, the real-world test case).
+Read HANDOFF.md for the full history (feedback log F1-F25, architecture, the real-world test case).
 
 ## Files
-- `src/ExeInspector_v8.ps1`            - the tool (current version, ~5,800 lines). Single file.
-- `build/ExeInspector_v8_EXE_Build_Package/` - what the user receives: the .ps1, Build-EXE.ps1, README.txt,
+- `src/ExeInspector_v9.ps1`            - the tool (current version, ~6,200 lines). Single file.
+- `build/ExeInspector_v9_EXE_Build_Package/` - what the user receives: the .ps1, Build-EXE.ps1, README.txt,
   ps2exe 1.0.18 module (MS-LPL, LICENSE.txt). Build-EXE.ps1 compiles the newest ExeInspector_v*.ps1 in that folder.
 - `tests/`                             - automated test kit (PowerShell 7 on Linux/WSL, GUI stubbed). See tests/README.md.
 
@@ -16,7 +16,7 @@ Read HANDOFF.md for the full history (feedback log F1-F20, architecture, the rea
 1. Windows PowerShell 5.1 only. Only what ships with Windows: WinForms, built-in cmdlets, UI Automation via
    `Add-Type -AssemblyName`. NO third-party tools, NO `Add-Type` C# compilation in the tool. (Tests may compile C#.)
 2. The .ps1 must stay pure ASCII (PS 5.1 reads BOM-less files as ANSI).
-   Check: `LC_ALL=C grep -cP '[^\x00-\x7F]' src/ExeInspector_v8.ps1` must print 0.
+   Check: `LC_ALL=C grep -cP '[^\x00-\x7F]' src/ExeInspector_v9.ps1` must print 0.
 3. No Write-Host and no stray pipeline output (compiled with ps2exe -noConsole -STA; stray output becomes message boxes).
    Use `[void]`, `$null =`, `| Out-Null`.
 4. Additive, conservative changes. Layer new code on; do not refactor verified code. When an existing line
@@ -31,7 +31,7 @@ Read HANDOFF.md for the full history (feedback log F1-F20, architecture, the rea
 - Credit line: "Developed by Isaac Sam Paul".
 - EVERY delivery = the GUI .ps1 + the EXE build package zip (Build-EXE.ps1, bundled ps2exe 1.0.18 + LICENSE,
   README.txt updated for the version, copy of the .ps1).
-- Feedback workflow: log each point as F-number (next is F21), propose a fix plan, implement ONLY after the user
+- Feedback workflow: log each point as F-number (next is F26), propose a fix plan, implement ONLY after the user
   says "proceed" (or explicitly "implement").
 - Ask before assuming. Verify facts with multiple sources. Actually test / stress-test code - never just describe it.
 - User wants concrete, step-by-step commands when troubleshooting; prefers config/software fixes before hardware.
@@ -41,7 +41,8 @@ Read HANDOFF.md for the full history (feedback log F1-F20, architecture, the rea
 ## Code layout (regions in the .ps1)
 `#region ENGINE` PE/.NET parsers -> `#region ENGINE2` (v3: related-file search, message matching, known messages,
 MSI exit codes) -> `#region ENGINE3` (v8: EH clauses, enum names, "how is this text reached", message-box texts,
-path pieces, log files, deployment-tool rules) -> `#region GUI` (WinForms; v3+ functions before
+path pieces, log files, deployment-tool rules) -> `#region ENGINE4` (v9: referenced files - every file/program
+named in the program's text, present or not; Get-ReferencedFiles, Get-RefSeverity) -> `#region GUI` (WinForms; v3+ functions before
 `# ---------------- build window ----------------`; v5+ report functions in the "v5 additions (F10)" block there).
 Engine/report functions must not touch GUI controls (keeps them testable).
 
@@ -60,10 +61,14 @@ Engine/report functions must not touch GUI controls (keeps them testable).
 - IL patterns differ between Debug and Release builds (Debug: `stloc N; ldloc N` before branches, `x == 0` for `!x`);
   analysis code must handle both.
 - Exit codes: only 0xC0000000-0xCFFFFFFF are NTSTATUS; small negatives (-33) are program-defined (F15).
+- Do not name a property `Count` on your own objects (v9 uses `Times`): a function returning a 1-item array unrolls,
+  and `$x.Count` then reads the property instead of the number of items.
+- Related Files lists only files that EXIST on the PC running the tool. Anything that must also show missing files
+  goes through `$S.Refs` (tab 11, F21).
 
 ## Checks before delivering
-1. Parse: `pwsh -NoProfile -c '$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile("src/ExeInspector_v8.ps1",[ref]$t,[ref]$e);$e.Count'` -> 0
+1. Parse: `pwsh -NoProfile -c '$t=$null;$e=$null;[void][System.Management.Automation.Language.Parser]::ParseFile("src/ExeInspector_v9.ps1",[ref]$t,[ref]$e);$e.Count'` -> 0
 2. ASCII check (above) -> 0
-3. `pwsh -NoProfile -File tests/run_all.ps1` -> ALL TESTS PASSED (107 checks at v8). Add tests for every new feature.
+3. `pwsh -NoProfile -File tests/run_all.ps1` -> ALL TESTS PASSED (147 checks at v9). Add tests for every new feature.
 4. Review the diff against the previous version: only additive changes, version bumped in all 4 places.
 5. Build the package folder + zip, update its README.txt.

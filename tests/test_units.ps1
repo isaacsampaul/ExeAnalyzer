@@ -1,4 +1,4 @@
-param([string]$Target = (Join-Path $PSScriptRoot '../src/ExeInspector_v8.ps1'))
+param([string]$Target = (Join-Path $PSScriptRoot '../src/ExeInspector_v9.ps1'))
 Add-Type -TypeDefinition @'
 using System.Collections.Generic;
 namespace System.Windows.Forms { public static class Application { public static void DoEvents() { } } }

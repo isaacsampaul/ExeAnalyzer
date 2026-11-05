@@ -1,7 +1,7 @@
-# HANDOFF - EXE Inspector (PowerShell WinForms tool) - continue from v8
+# HANDOFF - EXE Inspector (PowerShell WinForms tool) - continue from v9
 
-Status on 2026-11-04: v8 is the latest version, delivered and tested in the automated kit (107 checks pass).
-No feedback item is open. Next feedback number: F21.
+Status on 2026-11-05: v9 is the latest version (F21-F25), tested in the automated kit (147 checks pass).
+No feedback item is open. Next feedback number: F26.
 
 ## 1. What the tool is
 GUI tool to look inside Windows EXE/DLL files for troubleshooting (Foxboro/CCS stations, but GENERIC for any program).
@@ -9,7 +9,8 @@ Reads the target as bytes only; runs it only when the user presses Start on Run 
 
 Tabs: 1 Overview, 2 Script (PS2EXE recovery), 3 .NET Code (classes/methods/IL), 4 Imports and DLLs (recursive
 missing / wrong-bitness check), 5 Strings, 6 Resources, 7 Run and Watch, 8 Error History (event logs + WER),
-9 Related Files, 10 Dialog Finder (UI Automation capture + find the code/text that produces a box).
+9 Related Files, 10 Dialog Finder (UI Automation capture + find the code/text that produces a box),
+11 Referenced Files (v9: every file/program named in the program, present on this PC or not).
 
 Export Report folder `ExeInspector_<name>_<yyyyMMdd_HHmmss>`:
 | File | Since | Content |
@@ -22,6 +23,7 @@ Export Report folder `ExeInspector_<name>_<yyyyMMdd_HHmmss>`:
 | 14_ScriptOutline.txt | v5 | steps, functions, commands of a recovered PS2EXE script |
 | 15_ErrorHistory_StackCode.txt | v6 | every .NET exception stack with the IL of each method (>> = call to the next method) |
 | 16_ProgramLogs.txt | v8 | log files the program writes, last 200 lines each, + lines written during each run |
+| 17_ReferencedFiles.csv | v9 | every file / program named in the program's text: Present (Yes/No/Unknown on the PC that made the report), severity, kind, how used, arguments, offset, encoding, text |
 
 ## 2. Feedback log (all implemented)
 - F1-F5 (v2): grid MinimumWidth crash, guarded event handlers, absolute-path DLL check, column layout on DataBindingComplete.
@@ -51,6 +53,26 @@ Export Report folder `ExeInspector_<name>_<yyyyMMdd_HHmmss>`:
   services are flagged ($script:DeployPathRules: PDQ, SCCM/MECM, Intune, Ansible, Chocolatey, ConnectWise, Kaseya,
   ManageEngine, Tanium, BigFix, Puppet, Salt, SYSTEM profile, Windows\Temp, Package Cache) with the "no desktop"
   explanation; the message boxes the failing method can show are listed (Get-MessageBoxTexts).
+- F21 (v9): reported with TagSelect.exe (native Delphi, Schneider Electric) - on some stations
+  D:\opt\fox\ciocfg\api\iccdrvr.tsk.exe was missing, on others present, and the tool never showed it. Cause found in
+  the code (not the double dot another chat suspected - v8's full-path regex extracts it whole): Get-RelatedFiles drops
+  every path that does not exist on the PC running the tool, so a MISSING helper was never reported anywhere. Fix:
+  Get-ReferencedFiles ($S.Refs, region ENGINE4) lists every full path / file name / program-run-by-name in the
+  extracted strings (ASCII + UTF-16, whole file) and recovered script, with Present Yes/No/Unknown, FolderExists,
+  offset, encoding, usage and arguments. New tab 11, summary findings (Get-RefSeverity: missing program/code file =
+  WARNING; output "> file", temp folder, .log, data file, name without folder, unknown = INFO), report section 3
+  (Get-ReferencedFilesText), 17_ReferencedFiles.csv. Related Files unchanged, except it also lists present
+  referenced files the v3 patterns missed. Generic - nothing in it is specific to TagSelect or Foxboro.
+- F22 (v9): forward-slash paths (D:/opt/.../getpars.exe in command lines).
+- F23 (v9): a full path (drive, \\server\share, %VAR%) accepts any 1-5 character extension containing a letter (.SH, .TX);
+  a name without a folder needs a known extension, written all lower or all upper case ("System.Xml" is a .NET name).
+- F24 (v9): an extension followed by ".letter" does not end the path (iccdrvr.tsk.exe, file.dll.bak kept whole);
+  sentence-like matches ("C:\x is missing. Check y.txt") fall back to the part without spaces; text after an
+  executable path that looks like arguments is kept as Args; a path after ">" is an output (INFO).
+- F25 (v9): "name -switch ..." / "cmd /c name ..." with no extension is a program run by name when the name resolves
+  in the program folder / System32 / Windows / PATH, or the program also names name.exe with a full path
+  (glof -p csa_server + D:\opt\fox\bin\tools\glof.exe). Not found in PATH -> WARNING (Windows only searches the
+  working folder and PATH for it). api-ms-win-* / ext-ms-* names count as present (API sets).
 
 ## 3. Not yet verified on a real Windows station
 Everything since v6 passed the Linux test kit, and v8's engine was also checked against the REAL vendor DLL
@@ -60,6 +82,10 @@ Everything since v6 passed the Linux test kit, and v8's engine was also checked 
 3. F16-F20 in a real export of D:\Media\CCS\Setup.exe (Related Files should list IASoftwareInstallInfo.xml and
    SilentSetup.log; 08 IL should show `// = InstallInfoTag.DomainName` and `// = SetupEXEReturnVal...`).
 Ask the user for an export (zip) after analysing Setup.exe, running it once, searching Error History, exporting.
+4. F21-F25 on a real station: analyse TagSelect.exe on a station WITHOUT iccdrvr.tsk.exe (tab 11 should show it as
+   NOT on this PC and 00_Findings.txt should have a WARNING for it) and on one WITH it (Present = Yes); check that
+   `glof` (run by name in "glof -p csa_server") is resolved or flagged depending on PATH. Also check the time the
+   new scan adds on a big EXE in Windows PowerShell 5.1 (Linux pwsh 7: ~1.5 s for 124,000 strings).
 
 ## 4. Real-world case solved with the tool (keep as regression reference)
 Station CRAW01, domain QELNGONLR.DCS.local, account qelngonlr\ccsinstaller (member of IA Installer).

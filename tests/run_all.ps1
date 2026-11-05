@@ -9,7 +9,7 @@ $b = (& $pw -NoProfile -File (Join-Path $here 'build_mock.ps1') 2>&1 | Out-Strin
 if (-not (Test-Path (Join-Path $work 'media8/Setup.dll'))) { Write-Output 'build_mock.ps1 FAILED:'; Write-Output $b; exit 1 }
 Write-Output 'Mock program built.'
 $allOk = $true
-foreach ($t in 'test_units.ps1', 'harness_session.ps1', 'harness_edge.ps1') {
+foreach ($t in 'test_units.ps1', 'harness_session.ps1', 'harness_edge.ps1', 'harness_refs.ps1') {
     $out = (& $pw -NoProfile -File (Join-Path $here $t) 2>&1 | Out-String) -replace "\x1b\[[0-9;]*m", ''
     $pass = ([regex]::Matches($out, '(?m)^\s*PASS ')).Count
     $fails = @([regex]::Matches($out, '(?m)^\s*FAIL .*$') | ForEach-Object { $_.Value.Trim() })

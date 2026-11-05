@@ -84,3 +84,50 @@ Set-Content "$dir/Setup.ini" -Value "[Install]`nAuthMessage=Unable to reach the 
 Set-Content "$dir/state/IASoftwareInstallInfo.xml" -Value '<IASoftwareInstall><InstallerProperty name="DomainName" value="QELNGONLR.DCS" /></IASoftwareInstall>'
 Set-Content "$dir/state/SilentSetup.log" -Value "10/29/2026 10:07:27 AM ... Begin: Setup.exe /q:D:\Media\RPFiles\CCS_Day1.txt`n10/29/2026 10:07:29 AM ... ERROR_REBOOT_REQUIRED"
 Get-ChildItem $dir -Recurse -File | ForEach-Object { "{0,-40} {1}" -f $_.FullName.Substring($dir.Length), $_.Length }
+
+# ---- v9 (F21-F25): native (non-.NET) program, strings in a Delphi-style CODE section ----
+# Minimal valid PE32: DOS header, PE header, one CODE section holding NUL-terminated ASCII strings + one UTF-16 string.
+$nat = Join-Path $PSScriptRoot 'work/native9'
+New-Item -ItemType Directory -Force $nat | Out-Null
+$ascii = @(
+    'E:\apps\plant\bin\tools\getval.exe',
+    'E:\apps\plant\api\drv.tsk.exe',
+    'E:\apps\plant\api\drv.tsk.exe -d 1 -o 7 >C:\tmp\BLK.TX',
+    'E:/apps/plant/bin/tools/setval.exe -mDESC:%32d',
+    'E:\apps\plant\bin\tools\lister.exe',
+    'lister -p plant_server >C:\tmp\LST.TX',
+    'C:\tmp\GET_DATA.SH',
+    'The file E:\apps\plant\wp\editor.exe is missing, you cannot update displays',
+    'Cannot read E:\apps\plant\data\cfg is missing. Please check settings.xml',
+    'E:\apps\plant\lib\old.dll.bak',
+    'C:\Program Files\Vendor Suite\bin\viewer.exe',
+    '\\srv01\share\tools\sync.bat /x',
+    'helperx3.dll',
+    'Download from https://example.com/dl/tool.exe',
+    'version 3.9.0.0',
+    'System.Xml',
+    'Use -p for printing'
+)
+$sec = New-Object System.Collections.Generic.List[byte]
+foreach ($b in [byte[]](0x55, 0x8B, 0xEC, 0xC3)) { $sec.Add($b) }   # push ebp; mov ebp,esp; ret
+foreach ($s in $ascii) { $sec.AddRange([System.Text.Encoding]::ASCII.GetBytes($s)); $sec.Add(0); $sec.Add(0) }
+$sec.AddRange([System.Text.Encoding]::Unicode.GetBytes('E:\apps\plant\bin\report.exe')); $sec.Add(0); $sec.Add(0)
+while ($sec.Count % 0x200) { $sec.Add(0) }
+$img = New-Object byte[] (0x200 + $sec.Count)
+$w16 = { param($o, $v) [BitConverter]::GetBytes([uint16]$v).CopyTo($img, $o) }
+$w32 = { param($o, $v) [BitConverter]::GetBytes([uint32]$v).CopyTo($img, $o) }
+$img[0] = 0x4D; $img[1] = 0x5A; & $w32 0x3C 0x80
+$img[0x80] = 0x50; $img[0x81] = 0x45
+& $w16 0x84 0x14C; & $w16 0x86 1; & $w32 0x88 0x2A425E19; & $w16 0x94 0xE0; & $w16 0x96 0x010E
+$o = 0x98
+& $w16 $o 0x10B; $img[$o + 2] = 2; $img[$o + 3] = 25
+& $w32 ($o + 4) $sec.Count; & $w32 ($o + 16) 0x1000; & $w32 ($o + 20) 0x1000; & $w32 ($o + 28) 0x400000
+& $w32 ($o + 32) 0x1000; & $w32 ($o + 36) 0x200; & $w16 ($o + 40) 4; & $w16 ($o + 48) 4
+& $w32 ($o + 56) (0x1000 + [Math]::Ceiling($sec.Count / 0x1000) * 0x1000); & $w32 ($o + 60) 0x200; & $w16 ($o + 68) 2
+& $w32 ($o + 72) 0x100000; & $w32 ($o + 76) 0x4000; & $w32 ($o + 80) 0x100000; & $w32 ($o + 84) 0x1000; & $w32 ($o + 92) 16
+$sh = $o + 0xE0
+[System.Text.Encoding]::ASCII.GetBytes('CODE').CopyTo($img, $sh)
+& $w32 ($sh + 8) $sec.Count; & $w32 ($sh + 12) 0x1000; & $w32 ($sh + 16) $sec.Count; & $w32 ($sh + 20) 0x200; & $w32 ($sh + 36) 0x60000020
+$sec.ToArray().CopyTo($img, 0x200)
+[System.IO.File]::WriteAllBytes((Join-Path $nat 'PlantTool.exe'), $img)
+"native9/PlantTool.exe                    $($img.Length)"

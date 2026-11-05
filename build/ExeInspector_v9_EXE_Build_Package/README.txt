@@ -1,16 +1,16 @@
-EXE Inspector v8 - EXE build package
+EXE Inspector v9 - EXE build package
 Developed by Isaac Sam Paul
 =====================================
 
 CONTENTS
-  ExeInspector_v8.ps1   The tool (GUI). Can be run directly or compiled to an EXE.
+  ExeInspector_v9.ps1   The tool (GUI). Can be run directly or compiled to an EXE.
   Build-EXE.ps1         Compiles the tool to ExeInspector.exe with the bundled ps2exe.
   ps2exe\               ps2exe 1.0.18 module (Markus Scholtes, MS-LPL licence - see LICENSE.txt).
 
 RUN WITHOUT BUILDING
-  powershell.exe -ExecutionPolicy Bypass -STA -File .\ExeInspector_v8.ps1
+  powershell.exe -ExecutionPolicy Bypass -STA -File .\ExeInspector_v9.ps1
   (optional) add a file to analyse straight away:
-  powershell.exe -ExecutionPolicy Bypass -STA -File .\ExeInspector_v8.ps1 "D:\path\program.exe"
+  powershell.exe -ExecutionPolicy Bypass -STA -File .\ExeInspector_v9.ps1 "D:\path\program.exe"
 
 BUILD THE EXE
   1. Copy this folder to a Windows PC (Windows PowerShell 5.1).
@@ -44,6 +44,9 @@ EXPORT REPORT (top bar > Export Report)
                            (>> marks the call to the next method in the stack). Written only when stacks exist.
   16_ProgramLogs.txt       NEW in v8 - log files the program writes (found in its text), last 200 lines of
                            each, and the lines written to them during every Run and Watch run.
+  17_ReferencedFiles.csv   NEW in v9 - every file or program named in the program's text, with Present
+                           (Yes / No / Unknown on the PC that made the report), kind, how it is used,
+                           command-line arguments, offset and encoding in the file, and the text it is in.
   v8 analysis (works for any .NET program, and partly for native ones):
     - Related Files also finds files whose path the program builds from a folder text + a file-name text.
     - Dialog Finder / report explain how a message is reached: inside which catch / finally block, what
@@ -52,6 +55,19 @@ EXPORT REPORT (top bar > Export Report)
       (e.g. "ldc.i4.s 12  // = InstallInfoTag.DomainName"), also for enums defined in the program's DLLs.
     - Error History shows where each crashed copy was started from and flags copies started by
       deployment tools / services (PDQ, SCCM, Intune, ...), which have no desktop for message boxes.
+  v9 analysis (works for any program - native, .NET or script):
+    - New tab "11. Referenced Files": every file or program the program names, ALSO the ones that do not
+      exist on this PC (Related Files lists only files that exist - a missing helper program was never
+      shown there). Tick "Only files NOT on this PC" to see just the missing ones.
+    - Missing programs / code files are WARNINGs in 00_Findings.txt (summary + section 3) with evidence.
+      Files that are probably created when the program runs (command output "> file", temp folder, .log)
+      and names without a folder are INFO.
+    - Found now: paths with forward slashes (D:/folder/tool.exe), any extension on a full path (.sh, .TX),
+      names with a dot inside (tool.tsk.exe, file.dll.bak), \\server\share and %VARIABLE% paths, UTF-16 text,
+      command lines (arguments are kept separately), and programs started by name without an extension
+      ("tool -switch ..."), which Windows only finds in the working folder or PATH.
+    - Present / missing is checked on the PC running EXE Inspector: run it ON the station that has the
+      problem (or compare the reports of a working and a failing station).
   Run and Watch / Dialog Finder history is kept for the whole session (the Clear button only
   clears the Run and Watch view). A captured dialog that was never searched with "Find cause"
   is searched automatically when the report is exported.

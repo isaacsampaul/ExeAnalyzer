@@ -1,6 +1,6 @@
 # Test harness for ExeInspector_v5.ps1 on Linux pwsh: GUI controls, WinForms, UI Automation,
 # event log and CIM are stubbed; everything else (engine, run/watch, find cause, export) is the real code.
-param([string]$Target = (Join-Path $PSScriptRoot '../src/ExeInspector_v8.ps1'), [string]$OutRoot = (Join-Path $PSScriptRoot 'work/out_session'))
+param([string]$Target = (Join-Path $PSScriptRoot '../src/ExeInspector_v9.ps1'), [string]$OutRoot = (Join-Path $PSScriptRoot 'work/out_session'))
 if (Test-Path $OutRoot) { Remove-Item $OutRoot -Recurse -Force }   # fresh output folder for every run
 $ErrorActionPreference = 'Continue'
 $media = Join-Path $PSScriptRoot 'work/media8'

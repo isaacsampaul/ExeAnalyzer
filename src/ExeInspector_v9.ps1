@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    EXE Inspector v8 - look inside a Windows .exe/.dll to troubleshoot it.
+    EXE Inspector v9 - look inside a Windows .exe/.dll to troubleshoot it.
 
 .DESCRIPTION
     Pure PowerShell 5.1 + WinForms + UI Automation (built into Windows). No third-party tools,
@@ -23,7 +23,7 @@
 
 .NOTES
     Developed by Isaac Sam Paul
-    Version : v8
+    Version : v9
     Requires: Windows PowerShell 5.1 (Windows 7 SP1 / Server 2008 R2 and later)
     v2 changes: grid column layout re-applied when a tab is first shown (fixes the
               'MinimumWidth' error), every event handler guarded (errors go to Output
@@ -65,6 +65,21 @@
               IL listings mark try / catch / finally blocks.
               F20 - Error History shows where each crashed copy was started from and flags runs started by
               deployment tools / services (no desktop), and lists the message boxes the failing method shows.
+    v9 changes: F21 - new tab 11 "Referenced Files": every file or program named in the program's text, with whether
+              it exists on this PC. Related Files lists only files that exist, so a missing helper program was
+              never shown - exactly the one that matters. Missing programs / code files are WARNINGs in the
+              summary; report section 3 lists them with evidence (offset, text, arguments); 17_ReferencedFiles.csv.
+              F22 - paths written with forward slashes (D:/folder/file.exe) are found.
+              F23 - a full path (drive, \\server\share or %VARIABLE%) may end in any 1-5 character extension
+              (.sh, .TX, .dat ...); a name without a folder still needs a known extension.
+              F24 - a dot inside a file name no longer cuts it short (tool.tsk.exe, file.dll.bak are kept whole);
+              a path followed by command-line arguments keeps the arguments separately; "> file" outputs are
+              marked as created by the program.
+              F25 - programs started by name without an extension ("name -switch ...", also after cmd /c) are
+              found when the name is a program in the program folder / Windows / PATH, or the program also names
+              it with a full path; reported when Windows would not find it in PATH on this PC.
+              Existing tabs, Related Files and export files 00-16 are unchanged (Related Files also lists the
+              referenced files that exist and that the v3 patterns did not match).
 #>
 
 #region ENGINE
@@ -2457,6 +2472,271 @@ $script:NoDesktopText = 'it ran without a desktop (service, scheduled task or de
 #endregion ENGINE3
 
 
+#region ENGINE4
+# =====================================================================
+#  ENGINE v9 additions (F21-F25) - every file / program the analysed program names in its text, whether or
+#  not it exists on this PC. Generic: works on the extracted text of any program (native, .NET, script).
+#  Read-only: paths are only tested with File.Exists / Directory.Exists - never opened, loaded or run.
+# =====================================================================
+# Extensions treated as "a program or code the program runs / loads" (missing one = WARNING)
+$script:RefExecExts = 'exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|sh|py|pl|msi|dll|ocx|sys|cpl|scr|tsk'
+# Extensions accepted for a file name written WITHOUT a folder (a full path accepts any 1-5 character extension)
+$script:RefBareExts = 'dll|exe|ocx|sys|com|ps1|psm1|bat|cmd|vbs|js|sh|ini|cfg|config|xml|json|txt|mdb|accdb|csv|sql|reg|msi|env|acl|log'
+# F21-F24: a full path = drive (C:\ or C:/), UNC (\\server\share\) or %VARIABLE%\ start, then anything a path can
+# hold (spaces and dots too), ending at an extension that is NOT followed by another letter or ".letter"
+# (so "iccdrvr.tsk.exe" and "a.dll.bak" are kept whole). The extension must contain a letter ("v1.2" is no file).
+$script:RefPathBody = '(?:[A-Za-z]:[\\/]|\\\\[\w.$\-]+\\|%[A-Za-z_][\w()]*%[\\/]?)'
+$script:RefPathRx = '(?i)(?<![\w.%\\/])' + $script:RefPathBody + '[^\x00-\x1f"<>|*?%]*?\.((?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{1,5})(?![\w]|\.\w)'
+$script:RefTightRx = '(?i)^' + $script:RefPathBody + '[^\x00-\x20"<>|*?%]*?\.((?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{1,5})(?![\w]|\.\w)'
+$script:RefBareRx = '(?i)(?<![\w\\/:.%\-])((?=[\w\-.]*[A-Za-z])[A-Za-z0-9_][\w\-]*(?:\.[\w\-]+)*)\.(' + $script:RefBareExts + ')(?![\w]|\.\w)'
+$script:RefCmdRx = '^\s*"?([A-Za-z_][\w\-]{0,40})"?\s+([-/][A-Za-z?].*)$'
+$script:RefUncCache = @{}
+
+function Test-RefSentence {
+    # a candidate that contains spaces but reads like a sentence ("C:\x is missing. Check y.txt") is not one path
+    param([string]$v)
+    if ($v -notmatch '\s') { return $false }
+    $body = $v.Substring([Math]::Min(3, $v.Length))
+    if ($body -match '[.,;:!?]\s') { return $true }
+    if ($body -match '\s(?:[A-Za-z]:[\\/]|\\\\|%[A-Za-z_][\w()]*%)') { return $true }
+    if ($body -match '\s-\s|\s[-/][A-Za-z]\b') { return $true }
+    return $false
+}
+
+function Get-RefCommandArgs {
+    # text after a path that looks like command-line arguments (switches, numbers, paths, redirections)
+    param([string]$Rest)
+    if (-not $Rest -or $Rest -notmatch '^\s+(\S.*)$') { return '' }
+    $a = $Matches[1].Trim()
+    $first = ($a -split '\s+')[0]
+    if ($a -match '^[-/"%<>|&@0-9]' -or $first -match '[\\:=.]') {
+        if ($a.Length -gt 200) { $a = $a.Substring(0, 200) + '...' }
+        return $a
+    }
+    return ''
+}
+
+function Get-RefSearchDirs {
+    # folders Windows searches for a program started by name: program folder, System32, (SysWOW64), Windows, PATH
+    param([string]$ExeDir)
+    $dirs = New-Object System.Collections.Generic.List[string]
+    $cand = @($ExeDir)
+    if ($env:windir) { $cand += @((Join-Path $env:windir 'System32'), (Join-Path $env:windir 'SysWOW64'), $env:windir) }
+    if ($env:PATH) { $cand += @($env:PATH -split [System.IO.Path]::PathSeparator) }
+    foreach ($d in $cand) {
+        if (-not $d) { continue }
+        $x = $d.Trim().Trim('"')
+        try { $x = [Environment]::ExpandEnvironmentVariables($x) } catch { }
+        if ($x -and -not $dirs.Contains($x)) { $dirs.Add($x) }
+        if ($dirs.Count -ge 80) { break }
+    }
+    return , $dirs
+}
+
+function Find-RefInDirs {
+    # first folder that holds Name (or Name + one of Exts); '' when none
+    param([string]$Name, $Dirs, [string[]]$Exts = @(''))
+    foreach ($d in $Dirs) {
+        foreach ($e in $Exts) {
+            try { $p = Join-Path $d ($Name + $e); if ([System.IO.File]::Exists($p)) { return $p } } catch { }
+        }
+    }
+    return ''
+}
+
+function Test-RefPresent {
+    # Present: Yes / No / Unknown (variable not set on this PC, or network share not reachable)
+    param([string]$Path)
+    $r = [pscustomobject]@{ Present = 'Unknown'; Local = ''; FolderExists = ''; Note = '' }
+    $x = ConvertTo-LocalPath $Path
+    if ($x -match '%[A-Za-z_][\w()]*%') { $r.Note = 'environment variable not set on this PC'; return $r }
+    $r.Local = $x
+    try {
+        if ($x -match '^\\\\([^\\]+)\\([^\\]+)') {
+            $share = ('\\{0}\{1}' -f $Matches[1], $Matches[2]).ToLower()
+            if (-not $script:RefUncCache.ContainsKey($share)) {
+                $ok = $false
+                if ($script:RefUncCache.Count -lt 10) { try { $ok = [System.IO.Directory]::Exists($share) } catch { } }
+                $script:RefUncCache[$share] = $ok
+            }
+            if (-not $script:RefUncCache[$share]) { $r.Note = 'network share not reachable from this PC'; return $r }
+        }
+        if ([System.IO.File]::Exists($x)) { $r.Present = 'Yes' } else { $r.Present = 'No' }
+        $parent = [System.IO.Path]::GetDirectoryName($x)
+        if ($parent) { $r.FolderExists = $(if ([System.IO.Directory]::Exists($parent)) { 'yes' } else { 'no' }) }
+    } catch { $r.Present = 'Unknown'; $r.Note = $_.Exception.Message }
+    return $r
+}
+
+function Get-ReferencedFiles {
+    # F21: every file / program named in the program's text (full paths, file names, programs run by name),
+    # with whether it exists on this PC. Nothing is dropped because it is missing - that is the point.
+    # Strings = Get-ExeStrings output (Offset/Encoding/Text); ScriptText = recovered script (optional);
+    # SkipNames = DLL names already checked by the import scan.
+    param($Strings, [string]$ExeDir, [string]$ScriptText, [string[]]$SkipNames = @(), [int]$MaxItems = 2000)
+    $map = @{}
+    $list = New-Object System.Collections.Generic.List[object]
+    $skip = @{}; foreach ($n in $SkipNames) { if ($n) { $skip[$n.ToLower()] = $true } }
+    $texts = New-Object System.Collections.Generic.List[object]
+    if ($Strings) { foreach ($s1 in $Strings) { $texts.Add($s1) } }
+    if ($ScriptText) {
+        $ln = 0
+        foreach ($l in ($ScriptText -split "`r?`n")) { $ln++; $texts.Add([pscustomobject]@{ Offset = -1; Encoding = "script line $ln"; Text = $l }) }
+    }
+    $note = {
+        param([string]$path, [string]$kind, [string]$use, [string]$cmdArgs, $src)
+        $k = $kind.Substring(0, 1) + '|' + $path.Replace('/', '\').ToLower()
+        $e = $map[$k]
+        if (-not $e) {
+            if ($list.Count -ge $MaxItems) { return }
+            $smp = $src.Text.Trim(); if ($smp.Length -gt 160) { $smp = $smp.Substring(0, 160) + '...' }
+            $e = [pscustomobject]@{ Path = $path; Kind = $kind; Uses = (New-Object System.Collections.Generic.List[string]); Args = (New-Object System.Collections.Generic.List[string]);
+                Times = 0; Offset = $src.Offset; Encoding = $src.Encoding; Sample = $smp; Present = ''; FoundAt = ''; FolderExists = ''; Note = '' }
+            $map[$k] = $e; $list.Add($e)
+        }
+        $e.Times++
+        if ($use -and -not $e.Uses.Contains($use)) { $e.Uses.Add($use) }
+        if ($cmdArgs -and $e.Args.Count -lt 3 -and -not $e.Args.Contains($cmdArgs)) { $e.Args.Add($cmdArgs) }
+    }
+    $execRx = '(?i)^(' + $script:RefExecExts + ')$'
+    $cmdNames = New-Object System.Collections.Generic.List[object]
+    foreach ($src in $texts) {
+        $t = [string]$src.Text
+        if (-not $t -or $t.Length -lt 4) { continue }
+        if ($t.Length -gt 2000) { $t = $t.Substring(0, 2000) }
+        $blank = $t
+        # --- full paths (F21-F24) ---
+        if ($t -match '[A-Za-z]:[\\/]|\\\\|%[A-Za-z_]') {
+            $prx = New-Object System.Text.RegularExpressions.Regex($script:RefPathRx)
+            $pos = 0
+            while ($pos -lt $t.Length) {
+                $m = $prx.Match($t, $pos)
+                if (-not $m.Success) { break }
+                $v = $m.Value; $ext = $m.Groups[1].Value; $at = $m.Index
+                $pos = $at + $v.Length
+                if (Test-RefSentence $v) {
+                    # not one path: keep the part before the first space if that is a path, and look again from the next character
+                    $pos = $at + 1
+                    $m2 = [regex]::Match($t.Substring($at), $script:RefTightRx)
+                    if (-not $m2.Success) { continue }
+                    $v = $m2.Value; $ext = $m2.Groups[1].Value
+                    $pos = $at + $v.Length
+                }
+                $v = $v.TrimEnd(' ')
+                $before = $t.Substring(0, $at)
+                $rest = $t.Substring($at + $v.Length)
+                $use = 'named in the text'
+                $cmdArgs = ''
+                if ($before -match '>\s*"?$') { $use = 'output of a command (> redirect)' }
+                elseif ($ext -match $execRx) { $cmdArgs = Get-RefCommandArgs $rest; if ($cmdArgs) { $use = 'command line' } else { $use = 'program / code file' } }
+                & $note $v 'Full path' $use $cmdArgs $src
+                $blank = $blank.Remove($at, $v.Length).Insert($at, (' ' * $v.Length))
+            }
+        }
+        # --- file names without a folder ---
+        if ($blank -match '\.[A-Za-z]') {
+            foreach ($m in [regex]::Matches($blank, $script:RefBareRx)) {
+                $v = $m.Value
+                if ($v -match '%|\{\d' -or $v.Length -gt 120 -or $skip.ContainsKey($v.ToLower())) { continue }
+                $ext = $m.Groups[2].Value
+                # an extension is written all lower or all upper case; "System.Xml" / "Newtonsoft.Json" are .NET names, not files
+                if ($ext -cne $ext.ToLower() -and $ext -cne $ext.ToUpper()) { continue }
+                $cmdArgs = ''; $use = 'named in the text'
+                if ($ext -match $execRx) { $cmdArgs = Get-RefCommandArgs ($blank.Substring($m.Index + $v.Length)); $use = $(if ($cmdArgs) { 'command line' } else { 'program / code file' }) }
+                & $note $v 'File name only' $use $cmdArgs $src
+            }
+        }
+        # --- program run by name without an extension (F25): "name -switch ..." / "name /switch ..." ---
+        $cl = $t
+        for ($depth = 0; $depth -lt 2; $depth++) {
+            if ($cl -notmatch $script:RefCmdRx) { break }
+            $cName = $Matches[1]; $cArgs = $Matches[2].Trim()
+            $cmdNames.Add([pscustomobject]@{ Name = $cName; Args = $cArgs; Src = $src })
+            if ($cName -match '^(?i)(cmd|start|call)$' -and $cArgs -match '^(?i)/[ck]\s+(.+)$') { $cl = $Matches[1] } else { break }
+        }
+    }
+    # programs run by name: keep only names that resolve to a program, or that the program also names with an extension
+    $dirs = Get-RefSearchDirs $ExeDir
+    $named = @{}
+    foreach ($e in $list) {
+        $fn = [System.IO.Path]::GetFileName($e.Path.Replace('/', '\').Replace('\', [string][System.IO.Path]::DirectorySeparatorChar))
+        if ($fn -match ('(?i)^(.+)\.(' + $script:RefExecExts + ')$')) { $b = $Matches[1].ToLower(); if (-not $named.ContainsKey($b)) { $named[$b] = $e.Path } }
+    }
+    $cmdCache = @{}
+    foreach ($c in $cmdNames) {
+        $nm = $c.Name
+        $lk = $nm.ToLower()
+        if (-not $cmdCache.ContainsKey($lk)) {
+            if ($cmdCache.Count -ge 300) { continue }
+            $cmdCache[$lk] = Find-RefInDirs $nm $dirs @('.exe', '.com', '.bat', '.cmd')
+        }
+        $hit = $cmdCache[$lk]
+        $also = $named[$nm.ToLower()]
+        if (-not $hit -and -not $also) { continue }
+        $cmdArgs = $c.Args; if ($cmdArgs.Length -gt 200) { $cmdArgs = $cmdArgs.Substring(0, 200) + '...' }
+        & $note $nm 'Program run by name' 'command line' $cmdArgs $c.Src
+        $e = $map['P|' + $nm.ToLower()]
+        if ($e -and $also -and -not $e.Note) { $e.Note = "the program also names $also" }
+    }
+    # presence on this PC
+    foreach ($e in $list) {
+        try {
+            if ($e.Kind -eq 'Full path') {
+                $pr = Test-RefPresent $e.Path
+                $e.Present = $pr.Present; $e.FolderExists = $pr.FolderExists
+                if ($pr.Present -eq 'Yes') { $e.FoundAt = $pr.Local }
+                if ($pr.Note) { $e.Note = $pr.Note }
+            } elseif ($e.Kind -eq 'File name only' -and $e.Path -match '(?i)^(api-ms-win-|ext-ms-)') {
+                $e.Present = 'Yes'; $e.Note = 'API set (virtual, provided by Windows)'   # same rule as Resolve-DllLocation
+            } elseif ($e.Kind -eq 'File name only') {
+                $isExec = ($e.Path -match ('(?i)\.(' + $script:RefExecExts + ')$'))
+                $where = if ($isExec) { $dirs } else { @($ExeDir) }
+                $hit = Find-RefInDirs $e.Path $where
+                if ($hit) { $e.Present = 'Yes'; $e.FoundAt = $hit }
+                else { $e.Present = 'No'; $e.Note = $(if ($isExec) { 'not in the program folder, Windows folders or PATH' } else { 'not in the program folder (it may be looked for in the working folder or created at run time)' }) }
+            } else {
+                $hit = Find-RefInDirs $e.Path $dirs @('.exe', '.com', '.bat', '.cmd')
+                if ($hit) { $e.Present = 'Yes'; $e.FoundAt = $hit }
+                else {
+                    $e.Present = 'No'
+                    $n2 = "Windows starts '$($e.Path)' only from the working folder or a folder in PATH - not found there on this PC"
+                    $e.Note = $(if ($e.Note) { $n2 + '; ' + $e.Note } else { $n2 })
+                }
+            }
+        } catch { $e.Present = 'Unknown'; $e.Note = $_.Exception.Message }
+    }
+    return , $list
+}
+
+function Get-RefSeverity {
+    # WARNING = a program / code file / command the program needs is missing; INFO = missing but probably created
+    # by the program itself, or its location is not known; '' = present (no finding)
+    param($R)
+    if ($R.Present -eq 'Yes') { return '' }
+    if ($R.Present -eq 'Unknown') { return 'INFO' }
+    if ($R.Kind -eq 'Program run by name') { return 'WARNING' }
+    $isExec = ($R.Path -match ('(?i)\.(' + $script:RefExecExts + ')$'))
+    if ($R.Kind -eq 'File name only') { return $(if ($isExec) { 'INFO' } else { '' }) }
+    $p = $R.Path.Replace('/', '\')
+    if ($R.Uses.Contains('output of a command (> redirect)') -or $p -match '(?i)\\(tmp|temp)\\|%(temp|tmp)%' -or $p -match '(?i)\.log$') { return 'INFO' }
+    if ($isExec) { return 'WARNING' }
+    return 'INFO'
+}
+
+function Format-RefEvidence {
+    param($R)
+    $parts = @()
+    $parts += ('{0}{1}, {2} time(s)' -f $(if ($R.Offset -ge 0) { ('offset 0x{0:X8} ' -f $R.Offset) } else { '' }), $(if ($R.Offset -ge 0) { "($($R.Encoding))" } else { $R.Encoding }), $R.Times)
+    if ($R.Uses.Count) { $parts += ('used as: ' + ($R.Uses -join ', ')) }
+    if ($R.Args.Count) { $parts += ('arguments: ' + ($R.Args -join ' | ')) }
+    if ($R.FolderExists) { $parts += ('folder exists: ' + $R.FolderExists) }
+    if ($R.Note) { $parts += $R.Note }
+    $parts += ('text: "' + $R.Sample + '"')
+    return ($parts -join '; ')
+}
+#endregion ENGINE4
+
+
 #region GUI
 # =====================================================================
 #  GUI
@@ -2465,7 +2745,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-$script:AppTitle = 'EXE Inspector v8'
+$script:AppTitle = 'EXE Inspector v9'
 $script:MonoFont = New-Object System.Drawing.Font('Consolas', 9.5)
 $script:UiFont = New-Object System.Drawing.Font('Segoe UI', 9)
 $script:BoldFont = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
@@ -3776,6 +4056,9 @@ function Get-RelatedFiles {
             & $add (Join-Path $exeDir $v) 'named in the program'
         }
     }
+    # v9 (F22-F25): referenced files that exist but the patterns above do not match (forward slashes, a dot inside
+    # the name, any extension, a program found in PATH)
+    try { if ($S.Refs) { foreach ($rr in $S.Refs) { if ($rr.Present -eq 'Yes' -and $rr.FoundAt) { & $add $rr.FoundAt ('named in the program ({0})' -f $rr.Kind.ToLower()) } } } } catch { }
     # v8 (F16): paths the program builds from pieces (folder text + file text), also inside its .NET helper DLLs
     try {
         $dllPaths = @($list | Where-Object { $_.Path -match '(?i)\.(dll|exe)$' -and $_.Path -ne '<embedded>' } | ForEach-Object { $_.Path })
@@ -3795,14 +4078,39 @@ function Get-RelatedFiles {
 
 function Update-RelatedTab {
     $S = $script:S
+    try {   # v9 (F21): every file / program named in the program, present or not
+        $S.Refs = $null
+        $imp = @(); if ($S.Imports) { $imp = @($S.Imports | ForEach-Object { [string]$_.Dll } | Select-Object -Unique) }
+        $S.Refs = Get-ReferencedFiles $S.Strings (Split-Path -Parent $S.Path) $(if ($S.PS -and $S.PS.Found) { $S.PS.Script } else { '' }) $imp
+    } catch { Write-Log "Referenced files: $($_.Exception.Message)" 'ERROR' }
     $S.Related = Get-RelatedFiles
     try { $S.ProgramLogs = Get-ProgramLogs } catch { $S.ProgramLogs = $null }   # v8 (F17)
+    try { Update-RefsTab } catch { Write-Log "Referenced files view: $($_.Exception.Message)" 'ERROR' }   # v9 (F21)
     $t = New-DataTableEx @('Name', 'Why it is related', 'Size:int', 'Path', '_Idx:int')
     for ($i = 0; $i -lt $S.Related.Count; $i++) { $r = $S.Related[$i]; [void]$t.Rows.Add($r.Name, $r.Why, [int64]$r.Size, $r.Path, [int64]$i) }
     $script:gridRel.DataSource = $t
     Set-GridColumnWidths $script:gridRel @{ 'Name' = 220; 'Why it is related' = 280; 'Size' = 90 } 'Path'
     $script:lblRel.Text = "{0} related file(s). Double-click one (or 'Decode selected') to analyse it; 'Back' returns here. Dialog Finder searches all of them." -f $S.Related.Count
     $script:btnBack.Enabled = ($script:History.Count -gt 0)
+}
+
+function Update-RefsTab {
+    # v9 (F21): tab 11 - every file / program named in the program, with whether it is on this PC
+    if (-not $script:gridRefs) { return }
+    $S = $script:S
+    $t = New-DataTableEx @('Present', 'Severity', 'Referenced as', 'Kind', 'How it is used', 'Arguments', 'Found at / note', 'Folder exists', 'Times:int', 'First offset', 'Encoding', 'Text')
+    $refs = @(); if ($S.Refs) { $refs = @(foreach ($q in $S.Refs) { $q }) }   # not @(List) - see pitfalls
+    $order = @{ 'No' = 0; 'Unknown' = 1; 'Yes' = 2 }
+    foreach ($r in @($refs | Sort-Object @{ e = { $order[$_.Present] } }, Kind, Path)) {
+        $off = if ($r.Offset -ge 0) { '0x{0:X8}' -f $r.Offset } else { '' }
+        $fa = if ($r.FoundAt) { $r.FoundAt } else { $r.Note }
+        [void]$t.Rows.Add($r.Present, (Get-RefSeverity $r), $r.Path, $r.Kind, ($r.Uses -join ', '), ($r.Args -join ' | '), $fa, $r.FolderExists, [int64]$r.Times, $off, $r.Encoding, $r.Sample)
+    }
+    if ($script:chkRefsMissing -and $script:chkRefsMissing.Checked) { $t.DefaultView.RowFilter = "Present <> 'Yes'" }
+    $script:gridRefs.DataSource = $t
+    Set-GridColumnWidths $script:gridRefs @{ 'Present' = 60; 'Severity' = 70; 'Referenced as' = 330; 'Kind' = 120; 'How it is used' = 170; 'Arguments' = 180; 'Found at / note' = 260; 'Folder exists' = 80; 'Times' = 50; 'First offset' = 90; 'Encoding' = 80 } 'Text'
+    $nNo = @($refs | Where-Object { $_.Present -eq 'No' }).Count; $nUn = @($refs | Where-Object { $_.Present -eq 'Unknown' }).Count
+    if ($script:lblRefs) { $script:lblRefs.Text = ("{0} file(s)/program(s) named in the program: {1} NOT on this PC, {2} unknown. Checked on {3}." -f $refs.Count, $nNo, $nUn, $env:COMPUTERNAME) }
 }
 
 function Save-EmbeddedToTemp {
@@ -4744,6 +5052,20 @@ function Get-AllFindings {
         }
     }
     if ($pe -and $pe.Valid -and $pe.Dirs -and $pe.Dirs[4][1] -eq 0) { & $add 'INFO' 'Signature' 'File is not digitally signed' 'No Authenticode certificate in the file.' }
+    try {   # v9 (F21-F25): files / programs named in the program that are not on this PC
+        if ($S.Refs) {
+            $nW = 0; $nI = 0; $more = 0
+            foreach ($r in $S.Refs) {
+                $sev = Get-RefSeverity $r
+                if (-not $sev) { continue }
+                if (($sev -eq 'WARNING' -and $nW -ge 40) -or ($sev -eq 'INFO' -and $nI -ge 20)) { $more++; continue }
+                if ($sev -eq 'WARNING') { $nW++ } else { $nI++ }
+                $what = switch ($r.Kind) { 'Program run by name' { "Program started by name is not found on this PC: $($r.Path)" } 'File name only' { "File named in the program (no folder) is not found on this PC: $($r.Path)" } default { $(if ($r.Present -eq 'Unknown') { "File named in the program could not be checked: $($r.Path)" } elseif ($sev -eq 'INFO') { "File named in the program does not exist now (probably created when the program runs): $($r.Path)" } else { "File named in the program is missing on this PC: $($r.Path)" }) } }
+                & $add $sev 'Referenced files' $what (Format-RefEvidence $r)
+            }
+            if ($more -gt 0) { & $add 'INFO' 'Referenced files' ("{0} more referenced file(s) not on this PC" -f $more) 'See section 3 and 17_ReferencedFiles.csv.' }
+        }
+    } catch { }
 
     # --- Run and Watch ---
     $evSeen = @{}
@@ -4925,6 +5247,33 @@ function Get-RelatedFilesText {
         if ($inf.Company) { $meta += $inf.Company }
         if ($inf.Version) { $meta += "version $($inf.Version)" }
         if ($meta.Count) { [void]$sb.AppendLine(("       File info   : {0}" -f ($meta -join ', '))) }
+    }
+    return $sb.ToString()
+}
+
+function Get-ReferencedFilesText {
+    # v9 (F21): files / programs named in the program, the ones NOT on this PC first
+    $S = $script:S
+    if (-not $S.Refs -or $S.Refs.Count -eq 0) { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    $no = @(foreach ($q in $S.Refs) { if ($q.Present -ne 'Yes') { $q } })
+    $yes = @(foreach ($q in $S.Refs) { if ($q.Present -eq 'Yes') { $q } })
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine(("  [FILES AND PROGRAMS NAMED IN THE PROGRAM]  {0} found: {1} NOT on this PC / unknown, {2} present (checked on {3})" -f $S.Refs.Count, $no.Count, $yes.Count, $env:COMPUTERNAME))
+    [void]$sb.AppendLine('  Full list: 17_ReferencedFiles.csv. Severity: WARNING = a program / code file it needs is missing;')
+    [void]$sb.AppendLine('  INFO = missing but probably created at run time (output, temp, log, data file) or location unknown.')
+    $i = 0
+    foreach ($r in $no) {
+        $i++
+        if ($i -gt 200) { [void]$sb.AppendLine(("  ... {0} more - see 17_ReferencedFiles.csv" -f ($no.Count - 200))); break }
+        $sev = Get-RefSeverity $r
+        [void]$sb.AppendLine(("  {0,3}. [{1}{2}] {3}   ({4})" -f $i, $(if ($r.Present -eq 'Unknown') { 'UNKNOWN' } else { 'MISSING' }), $(if ($sev) { " - $sev" } else { '' }), $r.Path, $r.Kind.ToLower()))
+        [void]$sb.AppendLine(("       Evidence    : {0}" -f (Format-RefEvidence $r)))
+    }
+    if ($yes.Count -gt 0) {
+        [void]$sb.AppendLine('  Present on this PC:')
+        foreach ($r in @($yes | Select-Object -First 200)) { [void]$sb.AppendLine(("       {0}   ({1}){2}" -f $r.Path, $r.Kind.ToLower(), $(if ($r.FoundAt -and $r.FoundAt -ne $r.Path) { " -> $($r.FoundAt)" } elseif ($r.Note) { " - $($r.Note)" } else { '' }))) }
+        if ($yes.Count -gt 200) { [void]$sb.AppendLine(("       ... {0} more" -f ($yes.Count - 200))) }
     }
     return $sb.ToString()
 }
@@ -5354,7 +5703,7 @@ function Get-FindingsReportText {
                 }
                 $t.ToString() }),
         @('2) PROGRAM ANALYSIS', { Get-ProgramAnalysisText }),
-        @('3) RELATED FILES', { (Get-RelatedFilesText) + (Get-ProgramLogsText) }),
+        @('3) RELATED FILES', { (Get-RelatedFilesText) + (Get-ProgramLogsText) + (Get-ReferencedFilesText) }),
         @('4) RUN AND WATCH ANALYSIS', { Get-RunAnalysisText }),
         @('5) ERROR HISTORY ANALYSIS', { Get-ErrorHistoryText }),
         @('6) DIALOG FINDER ANALYSIS', { Get-DialogHistoryText $false })
@@ -5372,7 +5721,7 @@ function Get-FindingsReportText {
     & $ln '  Other files in this folder: 01_Overview.txt, 02-05 (DLLs, imports, strings, resources), 06 recovered script,'
     & $ln '  07/08 .NET members/IL, 09 last Run and Watch log, 10 Error History, 11 related files, 12 Dialog Finder detail,'
     & $ln '  13 Run and Watch events (all runs), 14 script outline, 15 code of .NET exception stacks (when any),'
-    & $ln '  16 program log files (when found).'
+    & $ln '  16 program log files (when found), 17 every file / program named in the program, present or not (v9).'
     & $ln $bar
     return $sb.ToString()
 }
@@ -5441,6 +5790,15 @@ function Export-ReportAnalysis {
             $written.Add('15_ErrorHistory_StackCode.txt')
         }
     } catch { Write-Log "Report: 15_ErrorHistory_StackCode.txt: $($_.Exception.Message)" 'WARN' }
+    try {   # v9 (F21)
+        $hdr17 = '"Present","Severity","ReferencedAs","Kind","HowUsed","Arguments","FoundAt","Note","FolderExists","Times","FirstOffset","Encoding","Text"'
+        if ($S.Refs -and $S.Refs.Count -gt 0) {
+            @(foreach ($q in $S.Refs) { [pscustomobject]@{ Present = $q.Present; Severity = (Get-RefSeverity $q); ReferencedAs = $q.Path; Kind = $q.Kind; HowUsed = ($q.Uses -join ', '); Arguments = ($q.Args -join ' | ');
+                        FoundAt = $q.FoundAt; Note = $q.Note; FolderExists = $q.FolderExists; Times = $q.Times; FirstOffset = $(if ($q.Offset -ge 0) { '0x{0:X8}' -f $q.Offset } else { '' }); Encoding = $q.Encoding; Text = $q.Sample } }) |
+                Export-Csv -LiteralPath (Join-Path $Dir '17_ReferencedFiles.csv') -NoTypeInformation -Encoding UTF8
+        } else { Set-Content -LiteralPath (Join-Path $Dir '17_ReferencedFiles.csv') -Value $hdr17 -Encoding UTF8 }
+        $written.Add('17_ReferencedFiles.csv')
+    } catch { Write-Log "Report: 17_ReferencedFiles.csv: $($_.Exception.Message)" 'WARN' }
     try {
         Set-Status 'Writing findings report...'
         Set-Content -LiteralPath (Join-Path $Dir '00_Findings.txt') -Value (Get-FindingsReportText) -Encoding UTF8
@@ -5501,7 +5859,7 @@ function Show-MainWindow {
     $bottom.Controls.Add($txtLog)
     $lblOut = New-Object System.Windows.Forms.Label; $lblOut.Text = 'Output'; $lblOut.Dock = 'Top'; $lblOut.Height = 18; $lblOut.Font = $script:BoldFont
     $bottom.Controls.Add($lblOut)
-    $lblCredit = New-Object System.Windows.Forms.Label; $lblCredit.Text = 'Developed by Isaac Sam Paul  |  EXE Inspector v8'; $lblCredit.Dock = 'Bottom'; $lblCredit.Height = 18
+    $lblCredit = New-Object System.Windows.Forms.Label; $lblCredit.Text = 'Developed by Isaac Sam Paul  |  EXE Inspector v9'; $lblCredit.Dock = 'Bottom'; $lblCredit.Height = 18
     $lblCredit.TextAlign = 'MiddleRight'; $lblCredit.ForeColor = [System.Drawing.Color]::Gray
     $bottom.Controls.Add($lblCredit)
 
@@ -5691,6 +6049,17 @@ function Show-MainWindow {
     "  - in related files: DLLs, configs, scripts and programs packed inside the EXE`r`nKnown Windows/runtime messages (missing DLL, side-by-side, VB6 run-time errors...) are explained directly."
     [void]$tabs.TabPages.Add($tabDlg)
 
+    # ===== Tab 11: Referenced Files (v9, F21) =====
+    $tabRefs = New-Object System.Windows.Forms.TabPage; $tabRefs.Text = '11. Referenced Files'
+    $gridRefs = New-Grid; $script:gridRefs = $gridRefs
+    $tabRefs.Controls.Add($gridRefs)
+    $stripRefs = New-Strip; $tabRefs.Controls.Add($stripRefs)
+    $chkRefsMissing = New-Object System.Windows.Forms.CheckBox; $chkRefsMissing.Text = 'Only files NOT on this PC'; $chkRefsMissing.Checked = $false
+    $chkRefsMissing.Location = New-Object System.Drawing.Point(8, 8); $chkRefsMissing.Size = New-Object System.Drawing.Size(180, 24); $script:chkRefsMissing = $chkRefsMissing; $stripRefs.Controls.Add($chkRefsMissing)
+    $lblRefs = New-Label 'Every file or program named in the program text (full paths, file names, programs run by name) - also the ones that do NOT exist on this PC.' 196 7 1080 24
+    $script:lblRefs = $lblRefs; $stripRefs.Controls.Add($lblRefs)
+    [void]$tabs.TabPages.Add($tabRefs)
+
     # ================= events =================
     $btnBrowse.Add_Click({ try {
             $dlg = New-Object System.Windows.Forms.OpenFileDialog
@@ -5750,6 +6119,7 @@ function Show-MainWindow {
 
     $btnStrApply.Add_Click({ try { Apply-StringFilter } catch { Write-Log ("Event Click: " + $_.Exception.Message) 'ERROR' } })
     $txtStrFilter.Add_KeyDown({ param($s, $e) try { if ($e.KeyCode -eq 'Enter') { $e.SuppressKeyPress = $true; Apply-StringFilter } } catch { Write-Log ("Event KeyDown: " + $_.Exception.Message) 'ERROR' } })
+    $chkRefsMissing.Add_CheckedChanged({ try { Update-RefsTab } catch { Write-Log ("Event CheckedChanged: " + $_.Exception.Message) 'ERROR' } })   # v9 (F21)
     $cmbCategory.Add_SelectedIndexChanged({ try { Apply-StringFilter } catch { Write-Log ("Event SelectedIndexChanged: " + $_.Exception.Message) 'ERROR' } })
     $chkNoise.Add_CheckedChanged({ try { Apply-StringFilter } catch { Write-Log ("Event CheckedChanged: " + $_.Exception.Message) 'ERROR' } })
 
